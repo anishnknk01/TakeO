@@ -1,0 +1,2382 @@
+// =============================================================================
+// PlayBite — Prisma Schema (Phase 2: Full Database Design)
+// PostgreSQL · Prisma 7
+//
+// Datasource URL is configured in prisma.config.ts (Prisma 7 convention).
+// The datasource block here declares the provider only.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// =============================================================================
+// ENUMS
+// =============================================================================
+
+/// User roles across the platform
+enum UserRole {
+  PLATFORM_ADMIN
+  RESTAURANT_OWNER
+  RESTAURANT_STAFF
+  CUSTOMER
+}
+
+/// Subscription plan tiers available to restaurant groups
+enum PlanTier {
+  FREE_TRIAL
+  STARTER
+  GROWTH
+  PROFESSIONAL
+  ENTERPRISE
+}
+
+/// Lifecycle states for a restaurant group's subscription
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  SUSPENDED
+  CANCELLED
+  EXPIRED
+}
+
+/// Physical presence verification method used when a customer checks in
+enum CheckInMethod {
+  QR_CODE
+  NFC_TAG
+  WIFI
+  BLUETOOTH_BEACON
+  STAFF_MANUAL
+}
+
+/// Status of a customer's visit/check-in session
+enum VisitStatus {
+  ACTIVE     // Customer is currently in-session
+  COMPLETED  // Session ended normally
+  EXPIRED    // Session timed out
+  FLAGGED    // Anti-cheat flagged; under review
+}
+
+/// Lifecycle of a game play session
+enum GameSessionStatus {
+  STARTED
+  COMPLETED
+  ABANDONED
+  INVALID    // Rejected by anti-cheat engine
+}
+
+/// Current state of a game in the catalog
+enum GameStatus {
+  PENDING_REVIEW
+  ACTIVE
+  INACTIVE
+  ARCHIVED
+}
+
+/// Category a game belongs to (used for filtering and analytics)
+enum GameCategoryType {
+  PUZZLE
+  TRIVIA
+  ARCADE
+  SPEED
+  MEMORY
+  QUIZ
+  REACTION
+  SPORTS
+  CASUAL
+  OTHER
+}
+
+/// Types of reward a customer can receive
+enum RewardType {
+  DISCOUNT_PERCENT
+  DISCOUNT_FIXED
+  FREE_ITEM
+  BUY_ONE_GET_ONE
+  SPIN_WHEEL
+  BADGE
+  POINTS_MULTIPLIER
+  CASHBACK
+  GIFT_VOUCHER
+  MYSTERY
+}
+
+/// Lifecycle state of a reward claim
+enum ClaimStatus {
+  PENDING
+  REDEEMED
+  EXPIRED
+  VOIDED
+}
+
+/// Delivery channel for a notification
+enum NotificationChannel {
+  SMS
+  PUSH
+  IN_APP
+  EMAIL
+}
+
+/// Whether an audit log entry records a write or a security event
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  LOGIN
+  LOGOUT
+  OTP_REQUESTED
+  OTP_VERIFIED
+  OTP_FAILED
+  PERMISSION_DENIED
+  ANTI_CHEAT_FLAG
+  REWARD_ISSUED
+  REWARD_REDEEMED
+}
+
+// =============================================================================
+// PLATFORM — Admin & Subscription
+// =============================================================================
+
+/// Platform-wide administrator. Has unrestricted access to all tenants.
+/// Soft-deleted via deletedAt rather than hard removal to preserve audit trail.
+model Admin {
+  id        String    @id @default(uuid())
+  email     String    @unique
+  name      String
+  avatarUrl String?
+  isActive  Boolean   @default(true)
+  deletedAt DateTime? // soft delete
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  auditLogs AuditLog[]
+  accounts  Account[]
+
+  @@index([email])
+  @@index([deletedAt])
+  @@map("admins")
+}
+
+/// A named commercial subscription plan with feature flags.
+/// Plans are managed by platform admins and assigned to restaurant groups.
+model SubscriptionPlan {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  tier        PlanTier
+  description String?
+  /// Monthly price in smallest currency unit (e.g. cents)
+  priceMonthly Int
+  /// Annual price (cents) — null means no annual option
+  priceAnnual  Int?
+  /// Trial duration in days (0 = no trial)
+  trialDays    Int      @default(14)
+  /// Maximum number of restaurant branches allowed
+  maxBranches Int      @default(1)
+  /// Maximum monthly active customers (0 = unlimited)
+  maxMonthlyCustomers Int @default(0)
+  /// Maximum number of games a group can activate
+  maxGames    Int      @default(3)
+  /// Maximum staff accounts
+  maxStaff    Int      @default(2)
+  /// Maximum spin-wheel prizes configurable
+  maxPrizes   Int      @default(5)
+  /// Whether leaderboard features are included
+  hasLeaderboard Boolean @default(false)
+  /// Whether analytics dashboard is included
+  hasAnalytics   Boolean @default(false)
+  /// Whether CSV/PDF export is available
+  hasExport      Boolean @default(false)
+  /// Whether priority support is included
+  hasPrioritySupport Boolean @default(false)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  subscriptions Subscription[]
+
+  @@index([tier])
+  @@map("subscription_plans")
+}
+
+/// A restaurant group's active subscription to a plan.
+/// One group has exactly one subscription at a time (enforced by unique FK).
+model Subscription {
+  id                 String             @id @default(uuid())
+  status             SubscriptionStatus @default(ACTIVE)
+  currentPeriodStart DateTime
+  currentPeriodEnd   DateTime
+  cancelledAt        DateTime?
+  /// External payment provider subscription ID (e.g. Stripe sub_xxx)
+  externalId         String?            @unique
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  planId            String
+  plan              SubscriptionPlan @relation(fields: [planId], references: [id])
+
+  restaurantGroupId String          @unique
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  invoices Invoice[]
+
+  @@index([status])
+  @@index([currentPeriodEnd])
+  @@map("subscriptions")
+}
+
+// =============================================================================
+// RESTAURANT GROUP — Multi-branch chain support
+// =============================================================================
+
+/// Top-level grouping entity. Independent restaurants have exactly one group.
+/// All customer identity, points, and leaderboards are scoped to a group.
+model RestaurantGroup {
+  id          String    @id @default(uuid())
+  name        String
+  slug        String    @unique
+  logoUrl     String?
+  /// Whether this is a chain (multiple restaurants) or independent
+  isChain     Boolean   @default(false)
+  deletedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  restaurants   Restaurant[]
+  customers     Customer[]
+  owners        RestaurantOwner[]
+  subscription  Subscription?
+  rewards       Reward[]
+  spinPrizes    SpinWheelPrize[]
+  leaderboards  DailyLeaderboard[]
+  weeklyBoards  WeeklyLeaderboard[]
+  lifetimeBoard LifetimeLeaderboard?
+  dailyAnalytics DailyAnalytics[]
+  leaderboardConfig LeaderboardConfig?
+  monthlyBoards   MonthlyLeaderboard[]
+  spinWheelConfig SpinWheelConfig?
+  leaderboardRewardRules LeaderboardRewardRule[]
+  weeklyMetrics   WeeklyMetrics[]
+  monthlyMetrics  MonthlyMetrics[]
+  onboarding      OnboardingProgress?
+  challenges      Challenge[]
+  tournaments     Tournament[]
+  seasonalEvents  SeasonalEvent[]
+  luckyHours      LuckyHour[]
+  campaigns       Campaign[]
+  levelConfigs    LevelConfig[]
+  achievements    Achievement[]
+  posIntegrations POSIntegration[]
+  whiteLabelConfig WhiteLabelConfig?
+  ssoConfigs       SSOConfig[]
+  ipRestrictions   IPRestriction[]
+  apiKeys          APIKey[]
+  webhookEndpoints WebhookEndpoint[]
+  integrations     Integration[]
+
+  @@index([slug])
+  @@index([deletedAt])
+  @@map("restaurant_groups")
+}
+
+/// A brand/business entity. Belongs to one group. Has one or more branches.
+model Restaurant {
+  id          String    @id @default(uuid())
+  name        String
+  description String?
+  logoUrl     String?
+  deletedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  restaurantGroupId String
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  branches  Branch[]
+  staff     RestaurantStaff[]
+  owners    RestaurantOwner[]
+  settings  RestaurantSettings?
+
+  @@index([restaurantGroupId])
+  @@index([deletedAt])
+  @@map("restaurants")
+}
+
+/// A physical location. Check-ins, sessions, and leaderboards are branch-scoped.
+model Branch {
+  id        String    @id @default(uuid())
+  name      String
+  address   String?
+  city      String?
+  country   String    @default("US")
+  /// IANA timezone identifier, e.g. "America/New_York"
+  timezone  String    @default("UTC")
+  latitude  Float?
+  longitude Float?
+  isActive  Boolean   @default(true)
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+
+  staffAssignments StaffBranchAssignment[]
+  visits           RestaurantVisit[]
+  checkInSessions  CheckInSession[]
+  restaurantGames  RestaurantGame[]
+  dailyLeaderboards DailyLeaderboard[]
+  gameSessions     GameSession[]
+  qrCodes          RestaurantQRCode[]
+  nfcTags          RestaurantNFCTag[]
+  checkInLogs      CheckInLog[]
+
+  @@index([restaurantId])
+  @@index([deletedAt])
+  @@index([isActive])
+  @@map("branches")
+}
+
+/// Per-restaurant configuration: spin wheel rules, anti-cheat thresholds, etc.
+model RestaurantSettings {
+  id                      String  @id @default(uuid())
+  /// Max visit session duration in minutes
+  maxSessionMinutes       Int     @default(360)
+  /// Max game plays per customer per day
+  maxPlaysPerDay          Int     @default(10)
+  /// Max points a customer can earn per day
+  maxPointsPerDay         Int     @default(5000)
+  /// QR token rotation interval in minutes (5–1440)
+  qrRotationMinutes       Int     @default(60)
+  /// Whether NFC check-in is enabled
+  nfcEnabled              Boolean @default(false)
+  /// Whether Wi-Fi check-in is enabled
+  wifiEnabled             Boolean @default(false)
+  /// Whether Bluetooth beacon check-in is enabled
+  beaconEnabled           Boolean @default(false)
+  /// Minimum plausible game duration in seconds (anti-cheat)
+  minGameDurationSeconds  Int     @default(5)
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  restaurantId String     @unique
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+
+  @@map("restaurant_settings")
+}
+
+// =============================================================================
+// RESTAURANT USERS — Owner & Staff
+// =============================================================================
+
+/// Owner of a restaurant group. Can manage all restaurants in their group.
+model RestaurantOwner {
+  id        String    @id @default(uuid())
+  email     String    @unique
+  name      String
+  phone     String?
+  avatarUrl String?
+  isActive  Boolean   @default(true)
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  restaurantGroupId String
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  restaurants Restaurant[]
+  accounts    Account[]
+
+  @@index([restaurantGroupId])
+  @@index([email])
+  @@index([deletedAt])
+  @@map("restaurant_owners")
+}
+
+/// Staff member assigned to one or more branches. Limited operational access.
+model RestaurantStaff {
+  id        String    @id @default(uuid())
+  email     String    @unique
+  name      String
+  phone     String?
+  isActive  Boolean   @default(true)
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+
+  branchAssignments StaffBranchAssignment[]
+  accounts          Account[]
+
+  @@index([restaurantId])
+  @@index([deletedAt])
+  @@map("restaurant_staff")
+}
+
+/// Many-to-many join table scoping staff to specific branches.
+model StaffBranchAssignment {
+  id        String   @id @default(uuid())
+  /// Whether this assignment grants redemption permission
+  canRedeem Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  staffId  String
+  staff    RestaurantStaff @relation(fields: [staffId], references: [id])
+  branchId String
+  branch   Branch          @relation(fields: [branchId], references: [id])
+
+  @@unique([staffId, branchId])
+  @@index([branchId])
+  @@map("staff_branch_assignments")
+}
+
+// =============================================================================
+// CUSTOMER — Identity, Profile & Device
+// =============================================================================
+
+/// Core customer identity, scoped per restaurant group.
+/// Same phone number in two different groups = two separate Customer rows.
+model Customer {
+  id            String    @id @default(uuid())
+  /// Encrypted at rest (AES-256) — stored as ciphertext
+  phoneNumber   String
+  displayHandle String?
+  /// Total lifetime points across all visits to this group
+  totalPoints   Int       @default(0)
+  isActive      Boolean   @default(true)
+  isBanned      Boolean   @default(false)
+  banReason     String?
+  deletedAt     DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  restaurantGroupId String
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  profile          CustomerProfile?
+  devices          CustomerDevice[]
+  visits           RestaurantVisit[]
+  checkInSessions  CheckInSession[]
+  gameSessions     GameSession[]
+  rewardClaims     RewardClaim[]
+  spinHistory      SpinHistory[]
+  leaderboardEntries DailyLeaderboardEntry[]
+  notifications    Notification[]
+  deviceSessions   DeviceSession[]
+  activityLogs     CustomerActivity[]
+  accounts         Account[]
+  deviceFingerprints DeviceFingerprint[]
+  personalBests    PersonalBest[]
+  weeklyEntries    WeeklyLeaderboardEntry[]
+  monthlyEntries   MonthlyLeaderboardEntry[]
+  lifetimeEntries  LifetimeLeaderboardEntry[]
+  leaderboardFlags LeaderboardFlag[]
+  winnerHistory    WinnerHistory[]
+  challengeProgress ChallengeProgress[]
+  referralsMade    Referral[]          @relation("ReferralsMade")
+  referralsReceived ReferralRedemption[] @relation("ReferralsReceived")
+  tournamentParticipations TournamentParticipant[]
+  aiRecommendations AIRecommendation[]
+  walletItems      WalletItem[]
+  achievementUnlocks AchievementUnlock[]
+  consentRecords   ConsentRecord[]
+
+  /// Phone is unique per group; same phone can exist in multiple groups
+  @@unique([phoneNumber, restaurantGroupId])
+  @@index([restaurantGroupId])
+  @@index([totalPoints])
+  @@index([deletedAt])
+  @@index([isBanned])
+  @@map("customers")
+}
+
+/// Optional extended profile data for a customer.
+model CustomerProfile {
+  id          String    @id @default(uuid())
+  firstName   String?
+  lastName    String?
+  email       String?
+  dateOfBirth DateTime?
+  avatarUrl   String?
+  /// Customer's marketing opt-in preference
+  marketingConsent Boolean @default(false)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  customerId String   @unique
+  customer   Customer @relation(fields: [customerId], references: [id])
+
+  @@map("customer_profiles")
+}
+
+/// Tracks physical devices used by a customer. Used for fraud detection.
+model CustomerDevice {
+  id           String   @id @default(uuid())
+  /// Hashed device fingerprint (not stored in plain text)
+  deviceHash   String
+  userAgent    String?
+  ipAddress    String?
+  /// Last time this device was seen
+  lastSeenAt   DateTime @default(now())
+  createdAt    DateTime @default(now())
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+
+  @@unique([customerId, deviceHash])
+  @@index([deviceHash])
+  @@index([ipAddress])
+  @@map("customer_devices")
+}
+
+// =============================================================================
+// VISIT SYSTEM — Check-in & Session
+// =============================================================================
+
+/// Records every customer visit to a branch. The outer envelope of a session.
+model RestaurantVisit {
+  id         String      @id @default(uuid())
+  status     VisitStatus @default(ACTIVE)
+  /// Points earned during this visit
+  pointsEarned Int       @default(0)
+  checkInAt  DateTime    @default(now())
+  checkOutAt DateTime?
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+  branchId   String
+  branch     Branch   @relation(fields: [branchId], references: [id])
+
+  checkInSession CheckInSession?
+  gameSessions   GameSession[]
+
+  @@index([customerId])
+  @@index([branchId])
+  @@index([status])
+  @@index([checkInAt])
+  @@map("restaurant_visits")
+}
+
+/// Captures how a customer verified physical presence for a visit.
+/// One CheckInSession per RestaurantVisit.
+model CheckInSession {
+  id               String        @id @default(uuid())
+  method           CheckInMethod
+  /// Raw artifact token presented (e.g. QR token value) — hashed for storage
+  artifactHash     String?
+  verifiedAt       DateTime      @default(now())
+  expiresAt        DateTime
+  /// IP address at time of check-in
+  ipAddress        String?
+  createdAt        DateTime      @default(now())
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+  branchId   String
+  branch     Branch   @relation(fields: [branchId], references: [id])
+  visitId    String   @unique
+  visit      RestaurantVisit @relation(fields: [visitId], references: [id])
+
+  @@index([customerId])
+  @@index([branchId])
+  @@index([method])
+  @@index([verifiedAt])
+  @@map("check_in_sessions")
+}
+
+// =============================================================================
+// GAMES — Catalog, Activation & Play Sessions
+// =============================================================================
+
+/// A category grouping for games displayed in the catalog.
+model GameCategory {
+  id          String           @id @default(uuid())
+  name        String           @unique
+  type        GameCategoryType
+  description String?
+  iconUrl     String?
+  sortOrder   Int              @default(0)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  games Game[]
+
+  @@map("game_categories")
+}
+
+/// A game in the platform catalog. Modular HTML5 games approved by platform admin.
+model Game {
+  id              String     @id @default(uuid())
+  name            String
+  slug            String     @unique
+  description     String?
+  thumbnailUrl    String?
+  /// Path or CDN URL where the game's HTML5 bundle is hosted
+  bundleUrl       String
+  /// Semantic version of the game bundle (e.g. "1.3.0")
+  version         String     @default("1.0.0")
+  status          GameStatus @default(PENDING_REVIEW)
+  /// Difficulty 1 (easy) – 5 (hard)
+  difficulty      Int        @default(2)
+  /// Estimated play time in seconds
+  estimatedPlaySecs Int      @default(60)
+  /// Maximum achievable score — used for anti-cheat plausibility checks
+  maxScore        Int        @default(1000000)
+  /// Minimum realistic play duration in seconds — anti-cheat lower bound
+  minDurationSecs Int        @default(5)
+  /// Points awarded per unit of score (numerator of score→points ratio)
+  pointsPerScore  Float      @default(1.0)
+  deletedAt       DateTime?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  categoryId String
+  category   GameCategory @relation(fields: [categoryId], references: [id])
+
+  restaurantGames RestaurantGame[]
+  gameSessions    GameSession[]
+  personalBests   PersonalBest[]
+  gameMetrics     GameMetrics[]
+
+  @@index([status])
+  @@index([slug])
+  @@index([deletedAt])
+  @@map("games")
+}
+
+/// Activation record: which games a restaurant branch has enabled.
+/// Restaurant owners enable games from the catalog per branch.
+model RestaurantGame {
+  id             String   @id @default(uuid())
+  isActive       Boolean  @default(true)
+  /// Custom max plays per customer per day for this branch (overrides group setting)
+  maxPlaysPerDay Int?
+  /// Score multiplier for this branch (e.g. 2.0 = double points)
+  scoreMultiplier Float   @default(1.0)
+  /// Whether this game is featured/pinned at the top of the list
+  isFeatured     Boolean  @default(false)
+  sortOrder      Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  gameId   String
+  game     Game   @relation(fields: [gameId], references: [id])
+  branchId String
+  branch   Branch @relation(fields: [branchId], references: [id])
+
+  @@unique([gameId, branchId])
+  @@index([branchId, isActive])
+  @@map("restaurant_games")
+}
+
+/// A single play of a game by a customer. Score is validated server-side.
+model GameSession {
+  id          String            @id @default(uuid())
+  status      GameSessionStatus @default(STARTED)
+  /// Server-issued nonce to prevent score replay attacks
+  nonce       String            @unique
+  startedAt   DateTime          @default(now())
+  completedAt DateTime?
+  /// Actual duration in seconds (computed from start/end)
+  durationSecs Int?
+  /// Raw score submitted by the client
+  rawScore    Int?
+  /// Validated final score (null if session did not complete cleanly)
+  finalScore  Int?
+  /// Points awarded to the customer for this session
+  pointsAwarded Int             @default(0)
+  /// Anti-cheat flag reason if status = INVALID
+  flagReason  String?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+  gameId     String
+  game       Game     @relation(fields: [gameId], references: [id])
+  branchId   String
+  branch     Branch   @relation(fields: [branchId], references: [id])
+  visitId    String
+  visit      RestaurantVisit @relation(fields: [visitId], references: [id])
+
+  score GameScore?
+
+  @@index([customerId])
+  @@index([gameId])
+  @@index([branchId])
+  @@index([visitId])
+  @@index([status])
+  @@index([startedAt])
+  @@map("game_sessions")
+}
+
+/// Validated, immutable record of a game's final score. Written once on completion.
+model GameScore {
+  id        String   @id @default(uuid())
+  score     Int
+  createdAt DateTime @default(now())
+
+  sessionId String      @unique
+  session   GameSession @relation(fields: [sessionId], references: [id])
+
+  @@index([score])
+  @@map("game_scores")
+}
+
+// =============================================================================
+// LEADERBOARD — Daily, Weekly & Lifetime
+// =============================================================================
+
+/// Daily leaderboard header for one branch or for the whole group.
+/// One row per (group or branch) per calendar day.
+model DailyLeaderboard {
+  id       String   @id @default(uuid())
+  /// The local calendar date this board covers (YYYY-MM-DD, stored in UTC midnight)
+  date     DateTime
+  isFrozen Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  restaurantGroupId String
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+  /// Null means this is the group-wide board; non-null means branch-scoped board
+  branchId          String?
+  branch            Branch?         @relation(fields: [branchId], references: [id])
+
+  entries DailyLeaderboardEntry[]
+
+  @@unique([restaurantGroupId, branchId, date])
+  @@index([restaurantGroupId, date])
+  @@index([branchId, date])
+  @@map("daily_leaderboards")
+}
+
+/// One row per customer per daily leaderboard. Updated on each point event.
+model DailyLeaderboardEntry {
+  id          String   @id @default(uuid())
+  points      Int      @default(0)
+  rank        Int?
+  updatedAt   DateTime @updatedAt
+
+  leaderboardId String
+  leaderboard   DailyLeaderboard @relation(fields: [leaderboardId], references: [id])
+  customerId    String
+  customer      Customer         @relation(fields: [customerId], references: [id])
+
+  @@unique([leaderboardId, customerId])
+  @@index([leaderboardId, points])
+  @@index([customerId])
+  @@map("daily_leaderboard_entries")
+}
+
+/// Weekly aggregate leaderboard per restaurant group.
+model WeeklyLeaderboard {
+  id            String   @id @default(uuid())
+  /// ISO week start date (Monday)
+  weekStartDate DateTime
+  isFrozen      Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  restaurantGroupId String
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  entries WeeklyLeaderboardEntry[]
+
+  @@unique([restaurantGroupId, weekStartDate])
+  @@index([restaurantGroupId, weekStartDate])
+  @@map("weekly_leaderboards")
+}
+
+/// Lifetime leaderboard — one per restaurant group, continuously updated.
+model LifetimeLeaderboard {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  restaurantGroupId String          @unique
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  entries LifetimeLeaderboardEntry[]
+
+  @@map("lifetime_leaderboards")
+}
+
+// =============================================================================
+// REWARDS — Spin Wheel, Coupons & Claims
+// =============================================================================
+
+/// A reward definition configured by a restaurant owner.
+/// Can be a spin-wheel prize, leaderboard reward, or achievement badge.
+model Reward {
+  id          String     @id @default(uuid())
+  name        String
+  description String?
+  type        RewardType
+  /// For DISCOUNT_PERCENT: 0–100. For DISCOUNT_FIXED: amount in cents.
+  value       Float?
+  imageUrl    String?
+  /// Total remaining inventory; null = unlimited
+  inventory   Int?
+  isActive    Boolean    @default(true)
+  expiresAt   DateTime?
+  deletedAt   DateTime?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  restaurantGroupId String
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  claims      RewardClaim[]
+  spinPrizes  SpinWheelPrize[]
+  leaderboardRules LeaderboardRewardRule[]
+  winnerHistory    WinnerHistory[]
+  rewardMetrics    RewardMetrics[]
+  challenges       Challenge[]
+
+  @@index([restaurantGroupId, isActive])
+  @@index([type])
+  @@index([deletedAt])
+  @@map("rewards")
+}
+
+/// An instance of a reward issued to a customer.
+/// Contains the redemption code shown to the customer.
+model RewardClaim {
+  id             String      @id @default(uuid())
+  status         ClaimStatus @default(PENDING)
+  /// Unique alphanumeric code shown to customer for redemption
+  redemptionCode String      @unique
+  issuedAt       DateTime    @default(now())
+  redeemedAt     DateTime?
+  expiresAt      DateTime?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  rewardId   String
+  reward     Reward   @relation(fields: [rewardId], references: [id])
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+
+  @@index([customerId, status])
+  @@index([redemptionCode])
+  @@index([expiresAt])
+  @@map("reward_claims")
+}
+
+/// A coupon code that can be linked to a reward claim.
+model Coupon {
+  id          String    @id @default(uuid())
+  code        String    @unique
+  description String?
+  /// Maximum number of times this coupon can be used total
+  maxUses     Int?
+  usedCount   Int       @default(0)
+  isActive    Boolean   @default(true)
+  expiresAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([code])
+  @@index([isActive])
+  @@map("coupons")
+}
+
+/// One slot on a spin wheel. Each prize has a probability weight.
+model SpinWheelPrize {
+  id         String   @id @default(uuid())
+  label      String
+  /// Relative probability weight (0.0–1.0). All prizes for a group must sum to 1.0.
+  probability Float
+  /// Remaining inventory for this prize; null = unlimited
+  inventory  Int?
+  isActive   Boolean  @default(true)
+  sortOrder  Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  restaurantGroupId String
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+  rewardId          String
+  reward            Reward          @relation(fields: [rewardId], references: [id])
+
+  spinHistory SpinHistory[]
+
+  @@index([restaurantGroupId, isActive])
+  @@map("spin_wheel_prizes")
+}
+
+/// Immutable record of every spin wheel outcome.
+model SpinHistory {
+  id         String   @id @default(uuid())
+  /// Cryptographically seeded draw seed for audit trail
+  drawSeed   String?
+  spunAt     DateTime @default(now())
+
+  customerId String
+  customer   Customer       @relation(fields: [customerId], references: [id])
+  prizeId    String
+  prize      SpinWheelPrize @relation(fields: [prizeId], references: [id])
+
+  @@index([customerId])
+  @@index([prizeId])
+  @@index([spunAt])
+  @@map("spin_history")
+}
+
+// =============================================================================
+// NOTIFICATIONS
+// =============================================================================
+
+/// A notification sent or queued for a customer.
+model Notification {
+  id        String              @id @default(uuid())
+  channel   NotificationChannel
+  title     String
+  body      String
+  isRead    Boolean             @default(false)
+  sentAt    DateTime?
+  readAt    DateTime?
+  createdAt DateTime            @default(now())
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+
+  @@index([customerId, isRead])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+/// Per-customer preference for each notification channel.
+model NotificationPreference {
+  id        String              @id @default(uuid())
+  channel   NotificationChannel
+  isEnabled Boolean             @default(true)
+  updatedAt DateTime            @updatedAt
+
+  /// Stored as customerId directly rather than FK to keep this table light
+  customerId String
+
+  @@unique([customerId, channel])
+  @@index([customerId])
+  @@map("notification_preferences")
+}
+
+// =============================================================================
+// ANALYTICS
+// =============================================================================
+
+/// Daily aggregate metrics per restaurant group. Pre-computed for fast dashboard reads.
+model DailyAnalytics {
+  id               String   @id @default(uuid())
+  date             DateTime
+  totalVisits      Int      @default(0)
+  uniqueCustomers  Int      @default(0)
+  totalGamePlays   Int      @default(0)
+  totalPointsAwarded Int    @default(0)
+  totalRewardsIssued Int    @default(0)
+  totalRewardsRedeemed Int  @default(0)
+  totalSpins       Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  restaurantGroupId String
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  @@unique([restaurantGroupId, date])
+  @@index([restaurantGroupId, date])
+  @@map("daily_analytics")
+}
+
+/// Fine-grained per-customer activity log for engagement analytics.
+model CustomerActivity {
+  id         String   @id @default(uuid())
+  eventType  String   // e.g. "VISIT", "GAME_PLAY", "SPIN", "REWARD_CLAIM"
+  metadata   Json?    // flexible payload per event type
+  occurredAt DateTime @default(now())
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+
+  @@index([customerId, eventType])
+  @@index([occurredAt])
+  @@map("customer_activity")
+}
+
+// =============================================================================
+// SECURITY — Audit Log & Device Session
+// =============================================================================
+
+/// Immutable audit trail for every write operation and security event.
+model AuditLog {
+  id         String      @id @default(uuid())
+  action     AuditAction
+  /// Table or resource type affected, e.g. "Customer", "Reward"
+  entityType String
+  /// UUID of the affected row
+  entityId   String?
+  /// Actor who performed the action — UUID from any user table
+  actorId    String?
+  actorRole  UserRole?
+  /// IP address of the request
+  ipAddress  String?
+  /// JSON snapshot of changed fields (before/after)
+  diff       Json?
+  /// Human-readable justification (required for admin overrides)
+  note       String?
+  occurredAt DateTime    @default(now())
+
+  adminId String?
+  admin   Admin?  @relation(fields: [adminId], references: [id])
+
+  @@index([entityType, entityId])
+  @@index([actorId])
+  @@index([occurredAt])
+  @@index([action])
+  @@map("audit_logs")
+}
+
+/// Active authenticated device sessions for customers.
+/// Used for single-session enforcement and fraud detection.
+model DeviceSession {
+  id           String   @id @default(uuid())
+  /// Hashed JWT token identifier
+  tokenHash    String   @unique
+  ipAddress    String?
+  userAgent    String?
+  /// IANA timezone of the device at session creation
+  deviceTz     String?
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  lastActiveAt DateTime  @default(now())
+  createdAt    DateTime  @default(now())
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+
+  @@index([customerId])
+  @@index([expiresAt])
+  @@index([tokenHash])
+  @@map("device_sessions")
+}
+
+// =============================================================================
+// AUTH.JS ADAPTER TABLES (preserved from Phase 1)
+// =============================================================================
+
+/// Auth.js v5 polymorphic account link. Connects OAuth/credential providers
+/// to the role-specific user tables (PlatformAdmin was replaced by Admin above).
+model Account {
+  id                String  @id @default(uuid())
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  adminId           String?
+  admin             Admin?           @relation(fields: [adminId], references: [id])
+  restaurantOwnerId String?
+  restaurantOwner   RestaurantOwner? @relation(fields: [restaurantOwnerId], references: [id])
+  staffId           String?
+  staff             RestaurantStaff? @relation(fields: [staffId], references: [id])
+  customerId        String?
+  customer          Customer?        @relation(fields: [customerId], references: [id])
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+/// Auth.js v5 server-side session (used when switching to database strategy).
+model AuthSession {
+  id           String   @id @default(uuid())
+  sessionToken String   @unique
+  /// Role and userId denormalised for fast middleware lookups
+  userRole     UserRole
+  userId       String
+  expires      DateTime
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([userId])
+  @@index([expires])
+  @@map("auth_sessions")
+}
+
+/// Auth.js v5 OTP / magic-link verification tokens.
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// =============================================================================
+// PHASE 5 — Check-in System
+// =============================================================================
+
+/// Dynamic QR code token for a branch.
+/// A new token is generated on each rotation interval.
+/// The `tokenHash` is SHA-256(secret + branchId + issuedAt) — never stored plain.
+model RestaurantQRCode {
+  id          String   @id @default(uuid())
+  branchId    String
+  branch      Branch   @relation(fields: [branchId], references: [id])
+  /// SHA-256 hash of the signed token value — used for validation
+  tokenHash   String   @unique
+  /// Signed JWT token value returned to the dashboard (display only, not stored plain)
+  /// We store the hash above; this field is null in DB, set only in API response
+  isActive    Boolean  @default(true)
+  issuedAt    DateTime @default(now())
+  expiresAt   DateTime
+  /// How many times this token has been successfully used (should stay ≤ 1 per design)
+  useCount    Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  @@index([branchId, isActive])
+  @@index([expiresAt])
+  @@map("restaurant_qr_codes")
+}
+
+/// Physical NFC tag registered to a branch.
+/// The tag's UID is AES-256-GCM encrypted before storage.
+model RestaurantNFCTag {
+  id              String   @id @default(uuid())
+  branchId        String
+  branch          Branch   @relation(fields: [branchId], references: [id])
+  label           String?
+  /// AES-256-GCM ciphertext of the raw NFC UID
+  encryptedUid    String   @unique
+  /// HMAC-SHA256 of the raw UID — used for fast lookup without decryption
+  uidHash         String   @unique
+  isActive        Boolean  @default(true)
+  registeredAt    DateTime @default(now())
+  lastUsedAt      DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([branchId, isActive])
+  @@map("restaurant_nfc_tags")
+}
+
+/// Immutable log of every check-in attempt (success and failure).
+/// Separate from CheckInSession so failures are also auditable.
+model CheckInLog {
+  id            String        @id @default(uuid())
+  branchId      String
+  branch        Branch        @relation(fields: [branchId], references: [id])
+  customerId    String?
+  method        CheckInMethod
+  /// Whether the attempt was accepted
+  success       Boolean
+  /// Reason for failure if success = false
+  failReason    String?
+  /// Hashed device fingerprint presented
+  deviceHash    String?
+  ipAddress     String?
+  /// ID of the RestaurantVisit created on success
+  visitId       String?
+  occurredAt    DateTime      @default(now())
+
+  @@index([branchId, occurredAt])
+  @@index([customerId])
+  @@index([success, occurredAt])
+  @@map("check_in_logs")
+}
+
+/// Device fingerprint record for fraud/duplicate detection.
+/// One row per (hash, customer). Updated on each visit.
+model DeviceFingerprint {
+  id           String   @id @default(uuid())
+  customerId   String
+  customer     Customer @relation(fields: [customerId], references: [id])
+  /// SHA-256 of (userAgent + screenRes + timezone + language)
+  fingerprintHash String
+  userAgent    String?
+  ipAddress    String?
+  lastSeenAt   DateTime @default(now())
+  seenCount    Int      @default(1)
+  createdAt    DateTime @default(now())
+
+  @@unique([customerId, fingerprintHash])
+  @@index([fingerprintHash])
+  @@map("device_fingerprints")
+}
+
+// =============================================================================
+// PHASE 6 — Game Engine additions
+// =============================================================================
+
+/// Personal best score per customer per game (across all branches of a group).
+/// Updated atomically whenever a higher validated score is submitted.
+model PersonalBest {
+  id        String   @id @default(uuid())
+  score     Int
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+  gameId     String
+  game       Game     @relation(fields: [gameId], references: [id])
+
+  @@unique([customerId, gameId])
+  @@index([customerId])
+  @@index([gameId, score])
+  @@map("personal_bests")
+}
+
+// =============================================================================
+// PHASE 7 — Leaderboard & Competitive Scoring additions
+// =============================================================================
+
+/// Type of leaderboard period
+enum LeaderboardPeriod {
+  DAILY
+  WEEKLY
+  MONTHLY
+  LIFETIME
+}
+
+/// Per-group leaderboard configuration: chain-wide vs branch-scoped, active types
+model LeaderboardConfig {
+  id                    String   @id @default(uuid())
+  /// Whether the chain-wide leaderboard is active (chains only)
+  chainWideEnabled      Boolean  @default(false)
+  /// Which period types are enabled
+  dailyEnabled          Boolean  @default(true)
+  weeklyEnabled         Boolean  @default(true)
+  monthlyEnabled        Boolean  @default(true)
+  lifetimeEnabled       Boolean  @default(true)
+  /// Max entries shown on public leaderboard
+  displayTopN           Int      @default(10)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  restaurantGroupId String          @unique
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  @@map("leaderboard_configs")
+}
+
+/// Entries for the weekly leaderboard header (one per customer per week).
+model WeeklyLeaderboardEntry {
+  id        String   @id @default(uuid())
+  points    Int      @default(0)
+  rank      Int?
+  gamesPlayed Int    @default(0)
+  updatedAt DateTime @updatedAt
+
+  leaderboardId String
+  leaderboard   WeeklyLeaderboard @relation(fields: [leaderboardId], references: [id])
+  customerId    String
+  customer      Customer          @relation(fields: [customerId], references: [id])
+
+  @@unique([leaderboardId, customerId])
+  @@index([leaderboardId, points])
+  @@index([customerId])
+  @@map("weekly_leaderboard_entries")
+}
+
+/// Monthly leaderboard header — one per (group, month start date).
+model MonthlyLeaderboard {
+  id             String   @id @default(uuid())
+  /// First day of the month (UTC midnight)
+  monthStartDate DateTime
+  isFrozen       Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  restaurantGroupId String
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  entries MonthlyLeaderboardEntry[]
+
+  @@unique([restaurantGroupId, monthStartDate])
+  @@index([restaurantGroupId, monthStartDate])
+  @@map("monthly_leaderboards")
+}
+
+/// One row per customer per monthly leaderboard.
+model MonthlyLeaderboardEntry {
+  id          String   @id @default(uuid())
+  points      Int      @default(0)
+  rank        Int?
+  gamesPlayed Int      @default(0)
+  updatedAt   DateTime @updatedAt
+
+  leaderboardId String
+  leaderboard   MonthlyLeaderboard @relation(fields: [leaderboardId], references: [id])
+  customerId    String
+  customer      Customer           @relation(fields: [customerId], references: [id])
+
+  @@unique([leaderboardId, customerId])
+  @@index([leaderboardId, points])
+  @@index([customerId])
+  @@map("monthly_leaderboard_entries")
+}
+
+/// One row per customer in the lifetime leaderboard for a group.
+model LifetimeLeaderboardEntry {
+  id          String   @id @default(uuid())
+  points      Int      @default(0)
+  rank        Int?
+  gamesPlayed Int      @default(0)
+  updatedAt   DateTime @updatedAt
+
+  leaderboardId String
+  leaderboard   LifetimeLeaderboard @relation(fields: [leaderboardId], references: [id])
+  customerId    String
+  customer      Customer            @relation(fields: [customerId], references: [id])
+
+  @@unique([leaderboardId, customerId])
+  @@index([leaderboardId, points])
+  @@index([customerId])
+  @@map("lifetime_leaderboard_entries")
+}
+
+/// Suspicious activity log for the leaderboard anti-cheat review queue.
+model LeaderboardFlag {
+  id          String   @id @default(uuid())
+  reason      String
+  details     String?
+  isResolved  Boolean  @default(false)
+  resolvedBy  String?  // Admin ID
+  resolvedAt  DateTime?
+  createdAt   DateTime @default(now())
+
+  customerId          String
+  customer            Customer @relation(fields: [customerId], references: [id])
+  restaurantGroupId   String
+
+  @@index([customerId])
+  @@index([restaurantGroupId, isResolved])
+  @@index([createdAt])
+  @@map("leaderboard_flags")
+}
+
+// =============================================================================
+// PHASE 8 — Rewards, Spin Wheel & Prize Redemption additions
+// =============================================================================
+
+/// Spin eligibility rules
+enum SpinEligibility {
+  ONE_PER_VISIT
+  ONE_PER_DAY
+  MIN_GAME_SCORE
+}
+
+/// Per-group spin wheel configuration.
+model SpinWheelConfig {
+  id                    String          @id @default(uuid())
+  isEnabled             Boolean         @default(true)
+  eligibility           SpinEligibility @default(ONE_PER_VISIT)
+  /// Minimum game score required (only for MIN_GAME_SCORE eligibility)
+  minScoreRequired      Int             @default(0)
+  /// Custom daily spin limit (for ONE_PER_DAY, this overrides default of 1)
+  dailySpinLimit        Int             @default(1)
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+
+  restaurantGroupId String          @unique
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  @@map("spin_wheel_configs")
+}
+
+/// Leaderboard reward rules — auto-issued at end of period.
+model LeaderboardRewardRule {
+  id         String   @id @default(uuid())
+  /// Period this rule applies to (DAILY, WEEKLY, MONTHLY)
+  period     LeaderboardPeriod
+  /// Rank range: e.g. minRank=1, maxRank=1 means "1st place"
+  minRank    Int
+  maxRank    Int
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  rewardId          String
+  reward            Reward          @relation(fields: [rewardId], references: [id])
+  restaurantGroupId String
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  @@index([restaurantGroupId, period])
+  @@map("leaderboard_reward_rules")
+}
+
+/// History of leaderboard prizes issued to winners.
+model WinnerHistory {
+  id         String   @id @default(uuid())
+  period     LeaderboardPeriod
+  periodDate DateTime
+  rank       Int
+  createdAt  DateTime @default(now())
+
+  customerId        String
+  customer          Customer        @relation(fields: [customerId], references: [id])
+  rewardId          String
+  reward            Reward          @relation(fields: [rewardId], references: [id])
+  rewardClaimId     String?
+  restaurantGroupId String
+
+  @@index([restaurantGroupId, period, periodDate])
+  @@index([customerId])
+  @@map("winner_history")
+}
+
+// =============================================================================
+// PHASE 9 — Analytics & Business Intelligence
+// =============================================================================
+
+/// Weekly aggregated metrics per restaurant group.
+model WeeklyMetrics {
+  id                   String   @id @default(uuid())
+  weekStartDate        DateTime
+  totalVisits          Int      @default(0)
+  uniqueCustomers      Int      @default(0)
+  newCustomers         Int      @default(0)
+  returningCustomers   Int      @default(0)
+  totalGamePlays       Int      @default(0)
+  totalPointsAwarded   Int      @default(0)
+  totalRewardsIssued   Int      @default(0)
+  totalRewardsRedeemed Int      @default(0)
+  totalSpins           Int      @default(0)
+  avgSessionMinutes    Float    @default(0)
+  avgScore             Float    @default(0)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  restaurantGroupId String
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  @@unique([restaurantGroupId, weekStartDate])
+  @@index([restaurantGroupId, weekStartDate])
+  @@map("weekly_metrics")
+}
+
+/// Monthly aggregated metrics per restaurant group.
+model MonthlyMetrics {
+  id                   String   @id @default(uuid())
+  monthStartDate       DateTime
+  totalVisits          Int      @default(0)
+  uniqueCustomers      Int      @default(0)
+  newCustomers         Int      @default(0)
+  returningCustomers   Int      @default(0)
+  totalGamePlays       Int      @default(0)
+  totalPointsAwarded   Int      @default(0)
+  totalRewardsIssued   Int      @default(0)
+  totalRewardsRedeemed Int      @default(0)
+  totalSpins           Int      @default(0)
+  avgSessionMinutes    Float    @default(0)
+  avgScore             Float    @default(0)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  restaurantGroupId String
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  @@unique([restaurantGroupId, monthStartDate])
+  @@index([restaurantGroupId, monthStartDate])
+  @@map("monthly_metrics")
+}
+
+/// Per-game metrics snapshot (aggregated daily, kept for trending).
+model GameMetrics {
+  id              String   @id @default(uuid())
+  date            DateTime
+  totalPlays      Int      @default(0)
+  uniquePlayers   Int      @default(0)
+  avgScore        Float    @default(0)
+  avgDurationSecs Float    @default(0)
+  completionRate  Float    @default(0)
+  createdAt       DateTime @default(now())
+
+  gameId            String
+  game              Game            @relation(fields: [gameId], references: [id])
+  restaurantGroupId String
+
+  @@unique([gameId, restaurantGroupId, date])
+  @@index([gameId, date])
+  @@index([restaurantGroupId, date])
+  @@map("game_metrics")
+}
+
+/// Per-reward metrics snapshot.
+model RewardMetrics {
+  id               String   @id @default(uuid())
+  date             DateTime
+  totalIssued      Int      @default(0)
+  totalRedeemed    Int      @default(0)
+  redemptionRate   Float    @default(0)
+  createdAt        DateTime @default(now())
+
+  rewardId          String
+  reward            Reward   @relation(fields: [rewardId], references: [id])
+  restaurantGroupId String
+
+  @@unique([rewardId, restaurantGroupId, date])
+  @@index([restaurantGroupId, date])
+  @@map("reward_metrics")
+}
+
+// =============================================================================
+// PHASE 10 — SaaS Billing, Onboarding & Infrastructure
+// =============================================================================
+
+/// Payment provider enum — extensible for multiple gateways.
+enum PaymentProvider {
+  STRIPE
+  RAZORPAY
+  PAYPAL
+  MANUAL
+}
+
+/// Invoice status.
+enum InvoiceStatus {
+  DRAFT
+  OPEN
+  PAID
+  PAST_DUE
+  VOID
+  UNCOLLECTIBLE
+}
+
+/// Invoice record generated on each billing cycle or plan change.
+model Invoice {
+  id              String        @id @default(uuid())
+  invoiceNumber   String        @unique
+  status          InvoiceStatus @default(DRAFT)
+  /// Amount in smallest currency unit
+  amountDue       Int
+  amountPaid      Int           @default(0)
+  currency        String        @default("usd")
+  /// Tax amount (cents)
+  taxAmount       Int           @default(0)
+  /// Coupon discount applied (cents)
+  discountAmount  Int           @default(0)
+  /// External provider invoice ID
+  externalId      String?
+  provider        PaymentProvider @default(MANUAL)
+  periodStart     DateTime
+  periodEnd       DateTime
+  paidAt          DateTime?
+  dueAt           DateTime
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  subscriptionId    String
+  subscription      Subscription @relation(fields: [subscriptionId], references: [id])
+  restaurantGroupId String
+
+  paymentEvents PaymentEvent[]
+
+  @@index([restaurantGroupId])
+  @@index([status])
+  @@index([dueAt])
+  @@map("invoices")
+}
+
+/// Individual payment attempt / event log for an invoice.
+model PaymentEvent {
+  id           String          @id @default(uuid())
+  provider     PaymentProvider
+  eventType    String          // e.g. "charge.succeeded", "charge.failed"
+  /// External event/charge ID from the payment provider
+  externalId   String?
+  amount       Int
+  currency     String          @default("usd")
+  status       String          // "succeeded", "failed", "pending"
+  failReason   String?
+  metadata     Json?
+  occurredAt   DateTime        @default(now())
+
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id])
+
+  @@index([invoiceId])
+  @@index([occurredAt])
+  @@map("payment_events")
+}
+
+/// Billing coupon code for discounts on subscriptions.
+model BillingCoupon {
+  id            String    @id @default(uuid())
+  code          String    @unique
+  description   String?
+  /// Discount type: 'percent' or 'fixed'
+  discountType  String    @default("percent")
+  /// Discount value (percent 0-100 or fixed amount in cents)
+  discountValue Int
+  /// Max redemptions total
+  maxUses       Int?
+  usedCount     Int       @default(0)
+  isActive      Boolean   @default(true)
+  expiresAt     DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([code])
+  @@map("billing_coupons")
+}
+
+/// Tracks onboarding progress for new restaurant owners.
+model OnboardingProgress {
+  id                    String   @id @default(uuid())
+  step                  Int      @default(1)
+  /// Steps completed as a JSON array of step names
+  completedSteps        Json     @default("[]")
+  isComplete            Boolean  @default(false)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  restaurantGroupId String          @unique
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  @@map("onboarding_progress")
+}
+
+/// Notification delivery record.
+model NotificationDelivery {
+  id          String   @id @default(uuid())
+  channel     NotificationChannel
+  eventType   String   // e.g. "otp", "reward_won", "subscription_renewal"
+  recipient   String   // phone or email
+  subject     String?
+  body        String
+  status      String   @default("pending") // "pending", "sent", "failed"
+  sentAt      DateTime?
+  failReason  String?
+  createdAt   DateTime @default(now())
+
+  restaurantGroupId String?
+
+  @@index([eventType, createdAt])
+  @@index([status])
+  @@map("notification_deliveries")
+}
+
+// =============================================================================
+// V2 GROWTH FEATURES
+// =============================================================================
+
+// ─── Feature 1 & 2: Challenges & Missions ────────────────────────────────────
+
+enum ChallengeType {
+  PLAY_GAMES
+  VISIT_COUNT
+  SCORE_ABOVE
+  REFER_FRIEND
+  BIRTHDAY
+  WEEKEND
+  CUSTOM
+}
+
+enum ChallengePeriod {
+  DAILY
+  WEEKLY
+  MONTHLY
+  FESTIVAL
+  ONE_TIME
+}
+
+enum ChallengeStatus {
+  ACTIVE
+  COMPLETED
+  EXPIRED
+  CANCELLED
+}
+
+/// A challenge/mission definition created by a restaurant owner.
+model Challenge {
+  id              String          @id @default(uuid())
+  name            String
+  description     String?
+  type            ChallengeType
+  period          ChallengePeriod
+  /// JSON criteria e.g. {"targetCount":5,"gameId":"xxx","minScore":10000}
+  criteria        Json
+  /// Reward issued on completion
+  rewardId        String?
+  reward          Reward?         @relation(fields: [rewardId], references: [id])
+  /// Bonus points awarded on completion
+  bonusPoints     Int             @default(0)
+  startsAt        DateTime?
+  endsAt          DateTime?
+  isActive        Boolean         @default(true)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  restaurantGroupId String
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  progress ChallengeProgress[]
+
+  @@index([restaurantGroupId, isActive])
+  @@index([period])
+  @@map("challenges")
+}
+
+/// Tracks a customer's progress toward completing a challenge.
+model ChallengeProgress {
+  id            String          @id @default(uuid())
+  currentValue  Int             @default(0)
+  targetValue   Int
+  status        ChallengeStatus @default(ACTIVE)
+  completedAt   DateTime?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  challengeId String
+  challenge   Challenge @relation(fields: [challengeId], references: [id])
+  customerId  String
+  customer    Customer  @relation(fields: [customerId], references: [id])
+
+  @@unique([challengeId, customerId])
+  @@index([customerId, status])
+  @@map("challenge_progress")
+}
+
+// ─── Feature 3: Referral System ──────────────────────────────────────────────
+
+model Referral {
+  id           String   @id @default(uuid())
+  code         String   @unique
+  /// Bonus points given to referrer on successful referral
+  referrerBonus Int     @default(100)
+  /// Bonus points given to referred customer
+  refereeBonus  Int     @default(50)
+  usedCount    Int      @default(0)
+  maxUses      Int?
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  referrerId        String
+  referrer          Customer @relation("ReferralsMade", fields: [referrerId], references: [id])
+  restaurantGroupId String
+
+  referees ReferralRedemption[]
+
+  @@index([referrerId])
+  @@index([code])
+  @@map("referrals")
+}
+
+model ReferralRedemption {
+  id         String   @id @default(uuid())
+  createdAt  DateTime @default(now())
+
+  referralId String
+  referral   Referral @relation(fields: [referralId], references: [id])
+  refereeId  String
+  referee    Customer @relation("ReferralsReceived", fields: [refereeId], references: [id])
+
+  @@unique([referralId, refereeId])
+  @@map("referral_redemptions")
+}
+
+// ─── Feature 4 & 5: Tournaments & Team Battles ───────────────────────────────
+
+enum TournamentType {
+  DAILY
+  WEEKEND
+  FESTIVAL
+  TEAM
+}
+
+enum TournamentStatus {
+  UPCOMING
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+model Tournament {
+  id          String           @id @default(uuid())
+  name        String
+  description String?
+  type        TournamentType
+  status      TournamentStatus @default(UPCOMING)
+  gameId      String?
+  startsAt    DateTime
+  endsAt      DateTime
+  entryFee    Int              @default(0)
+  prizePool   Json?
+  maxPlayers  Int?
+  isTeamBased Boolean          @default(false)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  restaurantGroupId String
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  participants TournamentParticipant[]
+  teams        TournamentTeam[]
+
+  @@index([restaurantGroupId, status])
+  @@index([startsAt])
+  @@map("tournaments")
+}
+
+model TournamentParticipant {
+  id        String   @id @default(uuid())
+  score     Int      @default(0)
+  rank      Int?
+  joinedAt  DateTime @default(now())
+
+  tournamentId String
+  tournament   Tournament @relation(fields: [tournamentId], references: [id])
+  customerId   String
+  customer     Customer   @relation(fields: [customerId], references: [id])
+  teamId       String?
+  team         TournamentTeam? @relation(fields: [teamId], references: [id])
+
+  @@unique([tournamentId, customerId])
+  @@index([tournamentId, score])
+  @@map("tournament_participants")
+}
+
+model TournamentTeam {
+  id          String   @id @default(uuid())
+  name        String
+  totalScore  Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  tournamentId String
+  tournament   Tournament @relation(fields: [tournamentId], references: [id])
+
+  members TournamentParticipant[]
+
+  @@index([tournamentId, totalScore])
+  @@map("tournament_teams")
+}
+
+// ─── Feature 6: Seasonal Events ──────────────────────────────────────────────
+
+model SeasonalEvent {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  theme       String?
+  imageUrl    String?
+  startsAt    DateTime
+  endsAt      DateTime
+  /// JSON config for special rules (2x points, special prizes, etc.)
+  config      Json?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  restaurantGroupId String
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  @@index([restaurantGroupId, startsAt])
+  @@map("seasonal_events")
+}
+
+// ─── Feature 7: Lucky Hours ──────────────────────────────────────────────────
+
+enum LuckyHourType {
+  DOUBLE_POINTS
+  DOUBLE_SPINS
+  BONUS_REWARDS
+  MULTIPLIER
+}
+
+model LuckyHour {
+  id          String        @id @default(uuid())
+  name        String
+  type        LuckyHourType
+  multiplier  Float         @default(2.0)
+  /// Days of week (0=Sun, 6=Sat) as JSON array [1,2,3,4,5]
+  daysOfWeek  Json          @default("[1,2,3,4,5]")
+  startTime   String        // HH:MM format
+  endTime     String        // HH:MM format
+  isActive    Boolean       @default(true)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  restaurantGroupId String
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  @@index([restaurantGroupId, isActive])
+  @@map("lucky_hours")
+}
+
+// ─── Feature 8: AI Recommendation Engine ─────────────────────────────────────
+
+/// Stores AI-generated recommendations per customer.
+model AIRecommendation {
+  id            String   @id @default(uuid())
+  /// Type: "game", "reward", "campaign_time", "churn_risk"
+  type          String
+  /// JSON payload with recommendation details
+  payload       Json
+  score         Float    @default(0)
+  isActioned    Boolean  @default(false)
+  createdAt     DateTime @default(now())
+
+  customerId        String?
+  customer          Customer? @relation(fields: [customerId], references: [id])
+  restaurantGroupId String
+
+  @@index([restaurantGroupId, type])
+  @@index([customerId])
+  @@map("ai_recommendations")
+}
+
+// ─── Feature 9: Marketing Center ─────────────────────────────────────────────
+
+enum CampaignChannel {
+  SMS
+  EMAIL
+  PUSH
+  IN_APP
+}
+
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  SENDING
+  SENT
+  CANCELLED
+}
+
+model Campaign {
+  id            String          @id @default(uuid())
+  name          String
+  channel       CampaignChannel
+  status        CampaignStatus  @default(DRAFT)
+  subject       String?
+  body          String
+  /// Target audience filter (JSON)
+  audienceFilter Json?
+  scheduledAt   DateTime?
+  sentAt        DateTime?
+  recipientCount Int            @default(0)
+  openRate      Float?
+  clickRate     Float?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  restaurantGroupId String
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  @@index([restaurantGroupId, status])
+  @@index([scheduledAt])
+  @@map("campaigns")
+}
+
+// ─── Feature 10: Customer Levels ─────────────────────────────────────────────
+
+enum CustomerLevel {
+  BRONZE
+  SILVER
+  GOLD
+  PLATINUM
+  DIAMOND
+}
+
+/// Level thresholds and benefits per restaurant group.
+model LevelConfig {
+  id              String        @id @default(uuid())
+  level           CustomerLevel
+  minPoints       Int
+  /// JSON benefits e.g. {"spinMultiplier":2,"exclusiveRewards":["id1"]}
+  benefits        Json?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  restaurantGroupId String
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  @@unique([restaurantGroupId, level])
+  @@map("level_configs")
+}
+
+// ─── Feature 11: Digital Wallet ──────────────────────────────────────────────
+
+enum WalletItemType {
+  POINTS
+  COUPON
+  GIFT_CARD
+  REWARD
+  BADGE
+}
+
+model WalletItem {
+  id          String         @id @default(uuid())
+  type        WalletItemType
+  /// Display label
+  label       String
+  /// Value (points amount, coupon value, etc.)
+  value       Int            @default(0)
+  /// Reference ID (rewardClaimId, couponId, etc.)
+  referenceId String?
+  isUsed      Boolean        @default(false)
+  expiresAt   DateTime?
+  createdAt   DateTime       @default(now())
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+
+  @@index([customerId, type, isUsed])
+  @@map("wallet_items")
+}
+
+// ─── Feature 12: Achievement System ──────────────────────────────────────────
+
+model Achievement {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  iconUrl     String?
+  /// Criteria as JSON e.g. {"type":"games_played","target":100}
+  criteria    Json
+  /// Points awarded on unlock
+  pointsReward Int     @default(0)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  restaurantGroupId String?
+  restaurantGroup   RestaurantGroup? @relation(fields: [restaurantGroupId], references: [id])
+
+  unlocks AchievementUnlock[]
+
+  @@index([restaurantGroupId])
+  @@map("achievements")
+}
+
+model AchievementUnlock {
+  id         String   @id @default(uuid())
+  unlockedAt DateTime @default(now())
+
+  achievementId String
+  achievement   Achievement @relation(fields: [achievementId], references: [id])
+  customerId    String
+  customer      Customer    @relation(fields: [customerId], references: [id])
+
+  @@unique([achievementId, customerId])
+  @@index([customerId])
+  @@map("achievement_unlocks")
+}
+
+// ─── Feature 13: POS Integration ─────────────────────────────────────────────
+
+model POSIntegration {
+  id          String   @id @default(uuid())
+  provider    String   // e.g. "square", "toast", "clover"
+  apiKey      String?  // encrypted
+  webhookUrl  String?
+  isActive    Boolean  @default(false)
+  config      Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  restaurantGroupId String
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  @@unique([restaurantGroupId, provider])
+  @@map("pos_integrations")
+}
+
+// ─── Feature 14: White Label ─────────────────────────────────────────────────
+
+model WhiteLabelConfig {
+  id             String   @id @default(uuid())
+  customDomain   String?  @unique
+  logoUrl        String?
+  faviconUrl     String?
+  primaryColor   String   @default("#c026d3")
+  secondaryColor String   @default("#171717")
+  appName        String   @default("PlayBite")
+  hidePlayBiteBranding Boolean @default(false)
+  customCss      String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  restaurantGroupId String          @unique
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  @@map("white_label_configs")
+}
+
+// ─── Feature 15: Marketplace ─────────────────────────────────────────────────
+
+enum MarketplaceItemType {
+  GAME
+  THEME
+  REWARD_TEMPLATE
+  MARKETING_TEMPLATE
+}
+
+model MarketplaceItem {
+  id          String              @id @default(uuid())
+  type        MarketplaceItemType
+  name        String
+  description String?
+  thumbnailUrl String?
+  price       Int                 @default(0) // cents, 0 = free
+  version     String              @default("1.0.0")
+  /// JSON config / template payload
+  payload     Json?
+  downloads   Int                 @default(0)
+  rating      Float               @default(0)
+  isPublished Boolean             @default(true)
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  authorId String? // Admin or partner ID
+
+  installations MarketplaceInstall[]
+
+  @@index([type, isPublished])
+  @@map("marketplace_items")
+}
+
+model MarketplaceInstall {
+  id          String   @id @default(uuid())
+  installedAt DateTime @default(now())
+
+  itemId            String
+  item              MarketplaceItem @relation(fields: [itemId], references: [id])
+  restaurantGroupId String
+
+  @@unique([itemId, restaurantGroupId])
+  @@index([restaurantGroupId])
+  @@map("marketplace_installs")
+}
+
+// =============================================================================
+// PHASE 12 — Enterprise Platform
+// =============================================================================
+
+// ─── 1. Multi-Country Support ────────────────────────────────────────────────
+
+model CountryConfig {
+  id          String   @id @default(uuid())
+  countryCode String   @unique // ISO 3166-1 alpha-2
+  countryName String
+  currency    String   @default("USD") // ISO 4217
+  locale      String   @default("en")
+  taxRate     Float    @default(0)
+  taxName     String   @default("VAT")
+  timezone    String   @default("UTC")
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("country_configs")
+}
+
+// ─── 3. Enterprise Security — SSO & API Keys ─────────────────────────────────
+
+enum SSOProvider {
+  SAML
+  OAUTH
+  OIDC
+}
+
+model SSOConfig {
+  id           String      @id @default(uuid())
+  provider     SSOProvider
+  /// Identity provider metadata URL or XML
+  metadataUrl  String?
+  clientId     String?
+  clientSecret String?     // encrypted
+  issuer       String?
+  callbackUrl  String?
+  isActive     Boolean     @default(true)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  restaurantGroupId String
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  @@unique([restaurantGroupId, provider])
+  @@map("sso_configs")
+}
+
+model IPRestriction {
+  id        String   @id @default(uuid())
+  /// CIDR notation or single IP
+  cidr      String
+  isAllow   Boolean  @default(true) // true=allow, false=deny
+  createdAt DateTime @default(now())
+
+  restaurantGroupId String
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  @@index([restaurantGroupId])
+  @@map("ip_restrictions")
+}
+
+// ─── 5. Developer Platform — API Keys & Webhooks ─────────────────────────────
+
+model APIKey {
+  id          String   @id @default(uuid())
+  name        String
+  /// SHA-256 hash of the key (never store plaintext)
+  keyHash     String   @unique
+  /// Prefix shown to user (first 8 chars)
+  keyPrefix   String
+  scopes      Json     @default("[\"read\"]") // ["read","write","admin"]
+  lastUsedAt  DateTime?
+  expiresAt   DateTime?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  restaurantGroupId String
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  @@index([restaurantGroupId])
+  @@index([keyHash])
+  @@map("api_keys")
+}
+
+model WebhookEndpoint {
+  id          String   @id @default(uuid())
+  url         String
+  /// Events to deliver e.g. ["visit.created","score.submitted"]
+  events      Json     @default("[]")
+  /// Secret used to sign payloads (HMAC-SHA256)
+  secret      String
+  isActive    Boolean  @default(true)
+  lastDeliveryAt DateTime?
+  failCount   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  restaurantGroupId String
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  deliveries WebhookDelivery[]
+
+  @@index([restaurantGroupId])
+  @@map("webhook_endpoints")
+}
+
+model WebhookDelivery {
+  id          String   @id @default(uuid())
+  event       String
+  payload     Json
+  httpStatus  Int?
+  response    String?
+  success     Boolean  @default(false)
+  attemptCount Int     @default(1)
+  deliveredAt DateTime @default(now())
+
+  endpointId String
+  endpoint   WebhookEndpoint @relation(fields: [endpointId], references: [id])
+
+  @@index([endpointId, deliveredAt])
+  @@map("webhook_deliveries")
+}
+
+// ─── 4. Integration Hub ──────────────────────────────────────────────────────
+
+enum IntegrationType {
+  POS
+  CRM
+  ERP
+  MARKETING
+  PAYMENT
+  CUSTOM
+}
+
+model Integration {
+  id          String          @id @default(uuid())
+  type        IntegrationType
+  provider    String          // e.g. "salesforce", "hubspot", "square"
+  name        String
+  config      Json?           // encrypted connection details
+  isActive    Boolean         @default(false)
+  lastSyncAt  DateTime?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  restaurantGroupId String
+  restaurantGroup   RestaurantGroup @relation(fields: [restaurantGroupId], references: [id])
+
+  @@unique([restaurantGroupId, type, provider])
+  @@map("integrations")
+}
+
+// ─── 9. Compliance — GDPR ────────────────────────────────────────────────────
+
+enum DataRequestType {
+  EXPORT
+  DELETION
+}
+
+enum DataRequestStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+model DataRequest {
+  id          String            @id @default(uuid())
+  type        DataRequestType
+  status      DataRequestStatus @default(PENDING)
+  /// Requesting user identity
+  requesterId String
+  requesterEmail String?
+  /// Download URL (for export requests)
+  resultUrl   String?
+  completedAt DateTime?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  restaurantGroupId String?
+
+  @@index([status])
+  @@index([requesterId])
+  @@map("data_requests")
+}
+
+model ConsentRecord {
+  id          String   @id @default(uuid())
+  consentType String   // "marketing", "analytics", "cookies"
+  isGranted   Boolean
+  ipAddress   String?
+  userAgent   String?
+  grantedAt   DateTime @default(now())
+  revokedAt   DateTime?
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+
+  @@index([customerId, consentType])
+  @@map("consent_records")
+}
+
+// ─── 8. Monitoring ───────────────────────────────────────────────────────────
+
+model SystemMetric {
+  id          String   @id @default(uuid())
+  name        String   // "api_latency_p95", "error_rate", "active_connections"
+  value       Float
+  unit        String?  // "ms", "percent", "count"
+  tags        Json?    // {"endpoint":"/api/games/start","region":"us-east-1"}
+  recordedAt  DateTime @default(now())
+
+  @@index([name, recordedAt])
+  @@map("system_metrics")
+}

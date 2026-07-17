@@ -1,0 +1,8 @@
+.next/
+node_modules/
+.kiro/
+.vscode/
+AGENTS.md
+CLAUDE.md
+public/
+package-lock.json
