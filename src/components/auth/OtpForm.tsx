@@ -95,8 +95,14 @@ export function OtpForm() {
         
         // Show success message briefly, then redirect
         setTimeout(() => {
-          // Use Next.js router for more reliable navigation
-          router.push('/demo-dashboard');
+          // Redirect based on user role
+          if (role === 'CUSTOMER') {
+            router.push('/customer/');
+          } else if (role === 'RESTAURANT_OWNER') {
+            router.push('/demo-dashboard');
+          } else {
+            router.push('/demo-dashboard');
+          }
         }, 1500); // Shorter delay for better UX
       } else {
         // Error case
@@ -263,7 +269,14 @@ export function OtpForm() {
             console.log('Force redirect to dashboard');
             setVerificationState('success');
             setTimeout(() => {
-              router.push('/demo-dashboard');
+              // Redirect based on user role
+              if (role === 'CUSTOMER') {
+                router.push('/customer/');
+              } else if (role === 'RESTAURANT_OWNER') {
+                router.push('/demo-dashboard');
+              } else {
+                router.push('/demo-dashboard');
+              }
             }, 500);
           }}
         >
