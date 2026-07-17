@@ -16,29 +16,23 @@
  * (or add "prisma": { "seed": "npx tsx prisma/seed.ts" } to package.json)
  */
 
-import {
-  PrismaClient,
-  PlanTier,
-  SubscriptionStatus,
-  GameStatus,
-  GameCategoryType,
-  RewardType,
-  CheckInMethod,
-  VisitStatus,
-  GameSessionStatus,
-  ClaimStatus,
-} from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
+import { PrismaClient } from '@prisma/client';
+
+// Use type-only imports for enums to avoid runtime issues
+type PlanTier = 'FREE_TRIAL' | 'STARTER' | 'GROWTH' | 'PROFESSIONAL' | 'ENTERPRISE';
+type SubscriptionStatus = 'TRIALING' | 'ACTIVE' | 'PAST_DUE' | 'SUSPENDED' | 'CANCELLED' | 'EXPIRED';
+type GameStatus = 'PENDING_REVIEW' | 'ACTIVE' | 'INACTIVE' | 'ARCHIVED';
+type GameCategoryType = 'PUZZLE' | 'TRIVIA' | 'ARCADE' | 'SPEED' | 'MEMORY' | 'QUIZ' | 'REACTION' | 'SPORTS' | 'CASUAL' | 'OTHER';
+type RewardType = 'DISCOUNT_PERCENT' | 'DISCOUNT_FIXED' | 'FREE_ITEM' | 'BUY_ONE_GET_ONE' | 'SPIN_WHEEL' | 'BADGE' | 'POINTS_MULTIPLIER' | 'CASHBACK' | 'GIFT_VOUCHER' | 'MYSTERY';
+type CheckInMethod = 'QR_CODE' | 'NFC_TAG' | 'WIFI' | 'BLUETOOTH_BEACON' | 'STAFF_MANUAL';
+type VisitStatus = 'ACTIVE' | 'COMPLETED' | 'EXPIRED' | 'FLAGGED';
+type GameSessionStatus = 'STARTED' | 'COMPLETED' | 'ABANDONED' | 'INVALID';
+type ClaimStatus = 'PENDING' | 'REDEEMED' | 'EXPIRED' | 'VOIDED';
 
 // ---------------------------------------------------------------------------
-// Client bootstrap (mirrors src/lib/prisma.ts singleton pattern)
+// Client bootstrap - Simple connection for deployment
 // ---------------------------------------------------------------------------
-const connectionString = process.env.DATABASE_URL;
-if (!connectionString) {
-  throw new Error('DATABASE_URL environment variable is not set');
-}
-const adapter = new PrismaPg({ connectionString });
-const prisma = new PrismaClient({ adapter });
+const prisma = new PrismaClient();
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -112,7 +106,7 @@ async function main() {
     prisma.subscriptionPlan.create({
       data: {
         name: 'Starter',
-        tier: PlanTier.STARTER,
+        tier: 'STARTER',
         description: 'Perfect for independent restaurants getting started.',
         priceMonthly: 2900,
         maxBranches: 1,
@@ -125,7 +119,7 @@ async function main() {
     prisma.subscriptionPlan.create({
       data: {
         name: 'Growth',
-        tier: PlanTier.GROWTH,
+        tier: 'GROWTH',
         description: 'Ideal for growing restaurants with multiple locations.',
         priceMonthly: 7900,
         maxBranches: 5,
@@ -138,7 +132,7 @@ async function main() {
     prisma.subscriptionPlan.create({
       data: {
         name: 'Enterprise',
-        tier: PlanTier.ENTERPRISE,
+        tier: 'ENTERPRISE',
         description: 'Full-featured for large chains and franchises.',
         priceMonthly: 24900,
         maxBranches: 100,
@@ -187,7 +181,7 @@ async function main() {
 
   await prisma.subscription.create({
     data: {
-      status: SubscriptionStatus.ACTIVE,
+      status: 'ACTIVE',
       currentPeriodStart: now,
       currentPeriodEnd: oneYearLater,
       planId: planStarter.id,
@@ -196,7 +190,7 @@ async function main() {
   });
   await prisma.subscription.create({
     data: {
-      status: SubscriptionStatus.ACTIVE,
+      status: 'ACTIVE',
       currentPeriodStart: now,
       currentPeriodEnd: oneYearLater,
       planId: planEnterprise.id,
@@ -333,9 +327,9 @@ async function main() {
 
   // ── 7. Game Categories & Games ───────────────────────────────────────────
   const [catPuzzle, catTrivia, catArcade] = await Promise.all([
-    prisma.gameCategory.create({ data: { name: 'Puzzle', type: GameCategoryType.PUZZLE, sortOrder: 1 } }),
-    prisma.gameCategory.create({ data: { name: 'Trivia', type: GameCategoryType.TRIVIA, sortOrder: 2 } }),
-    prisma.gameCategory.create({ data: { name: 'Arcade', type: GameCategoryType.ARCADE, sortOrder: 3 } }),
+    prisma.gameCategory.create({ data: { name: 'Puzzle', type: 'PUZZLE', sortOrder: 1 } }),
+    prisma.gameCategory.create({ data: { name: 'Trivia', type: 'TRIVIA', sortOrder: 2 } }),
+    prisma.gameCategory.create({ data: { name: 'Arcade', type: 'ARCADE', sortOrder: 3 } }),
   ]);
 
   const gameSeeds = [
@@ -358,7 +352,7 @@ async function main() {
           name: g.name,
           slug: g.slug,
           bundleUrl: `https://cdn.playbite.io/games/${g.slug}/index.html`,
-          status: GameStatus.ACTIVE,
+          status: 'ACTIVE',
           maxScore: g.max,
           minDurationSecs: g.min,
           pointsPerScore: g.pps,
@@ -383,7 +377,7 @@ async function main() {
     prisma.reward.create({
       data: {
         name: '10% Off Next Burger',
-        type: RewardType.DISCOUNT_PERCENT,
+        type: 'DISCOUNT_PERCENT',
         value: 10,
         inventory: 100,
         restaurantGroupId: groupA.id,
@@ -392,7 +386,7 @@ async function main() {
     prisma.reward.create({
       data: {
         name: 'Free Fries',
-        type: RewardType.FREE_ITEM,
+        type: 'FREE_ITEM',
         inventory: 50,
         restaurantGroupId: groupA.id,
       },
@@ -403,7 +397,7 @@ async function main() {
     prisma.reward.create({
       data: {
         name: '15% Off Tacos',
-        type: RewardType.DISCOUNT_PERCENT,
+        type: 'DISCOUNT_PERCENT',
         value: 15,
         inventory: 200,
         restaurantGroupId: groupB.id,
@@ -412,7 +406,7 @@ async function main() {
     prisma.reward.create({
       data: {
         name: 'Free Drink',
-        type: RewardType.FREE_ITEM,
+        type: 'FREE_ITEM',
         inventory: 100,
         restaurantGroupId: groupB.id,
       },
@@ -420,7 +414,7 @@ async function main() {
     prisma.reward.create({
       data: {
         name: '2x Points Boost',
-        type: RewardType.POINTS_MULTIPLIER,
+        type: 'POINTS_MULTIPLIER',
         value: 2,
         restaurantGroupId: groupB.id,
       },
@@ -500,13 +494,13 @@ async function main() {
       data: {
         customerId: customer.id,
         branchId: branchA1.id,
-        status: VisitStatus.COMPLETED,
+        status: 'COMPLETED',
         pointsEarned: 150 + i * 50,
         checkInAt: new Date(today.getTime() + i * 3600000),
         checkOutAt: new Date(today.getTime() + i * 3600000 + 1800000),
         checkInSession: {
           create: {
-            method: CheckInMethod.QR_CODE,
+            method: 'QR_CODE',
             customerId: customer.id,
             branchId: branchA1.id,
             verifiedAt: new Date(today.getTime() + i * 3600000),
@@ -526,7 +520,7 @@ async function main() {
         gameId: game.id,
         branchId: branchA1.id,
         visitId: visit.id,
-        status: GameSessionStatus.COMPLETED,
+        status: 'COMPLETED',
         nonce: `nonce-seed-${customer.id}-${i}`,
         startedAt: new Date(today.getTime() + i * 3600000 + 300000),
         completedAt: new Date(today.getTime() + i * 3600000 + 300000 + duration * 1000),
@@ -568,7 +562,7 @@ async function main() {
       data: {
         customerId: customersA[i].id,
         rewardId: rewardsGroupA[0].id,
-        status: i === 0 ? ClaimStatus.REDEEMED : ClaimStatus.PENDING,
+        status: i === 0 ? 'REDEEMED' : 'PENDING',
         redemptionCode: `BRGRLAB${String(1000 + i)}`,
         issuedAt: new Date(),
         redeemedAt: i === 0 ? new Date() : null,
